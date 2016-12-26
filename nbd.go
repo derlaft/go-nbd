@@ -7,6 +7,7 @@ package nbd
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"syscall"
@@ -151,7 +152,17 @@ func (nbd *NBD) Connect() (string, error) {
 		return "", &os.PathError{nbd.nbd.Name(), "ioctl NBD_SET_FLAGS", err}
 	}
 
-	go nbd.handle()
+	go func() {
+		err := nbd.handle()
+		if err != nil {
+			log.Printf("NBD error: %v, exiting", err)
+		}
+		err = nbd.Disconnect()
+		if err != nil {
+			log.Printf("Could not disconnect: %v", err)
+		}
+	}()
+
 	return dev, err
 }
 
@@ -159,15 +170,20 @@ func (nbd *NBD) Wait() error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	var err error
-
 	// NBD_DO_IT does not return until disconnect
-	err = ioctl(nbd.nbd.Fd(), NBD_DO_IT, 0)
+	err := ioctl(nbd.nbd.Fd(), NBD_DO_IT, 0)
 	if err != nil {
-		return &os.PathError{nbd.nbd.Name(), "ioctl NBD_DO_IT", err}
+		// yeah, return nil
+		// need this only to clean-up stuff after ioctl if it's successfull
+		// but I am not sure if it's even possible
+		return nil
 	}
 
-	err = ioctl(nbd.nbd.Fd(), NBD_DISCONNECT, 0)
+	return nbd.Disconnect()
+}
+
+func (nbd *NBD) Disconnect() error {
+	err := ioctl(nbd.nbd.Fd(), NBD_DISCONNECT, 0)
 	if err != nil {
 		return &os.PathError{nbd.nbd.Name(), "ioctl NBD_DISCONNECT", err}
 	}
@@ -181,12 +197,15 @@ func (nbd *NBD) Wait() error {
 }
 
 // handle requests
-func (nbd *NBD) handle() {
+func (nbd *NBD) handle() error {
 	buf := make([]byte, 2<<19)
 	var x request
 
 	for {
-		syscall.Read(nbd.socket, buf[0:28])
+		_, err := syscall.Read(nbd.socket, buf[0:28])
+		if err != nil {
+			return err
+		}
 
 		x.magic = binary.BigEndian.Uint32(buf)
 		x.typus = binary.BigEndian.Uint32(buf[4:8])
@@ -194,6 +213,7 @@ func (nbd *NBD) handle() {
 		x.from = binary.BigEndian.Uint64(buf[16:24])
 		x.len = binary.BigEndian.Uint32(buf[24:28])
 
+		// @TODO: handle all device err
 		switch x.magic {
 		case NBD_REPLY_MAGIC:
 			fallthrough
@@ -203,7 +223,10 @@ func (nbd *NBD) handle() {
 				nbd.device.ReadAt(buf[16:16+x.len], int64(x.from))
 				binary.BigEndian.PutUint32(buf[0:4], NBD_REPLY_MAGIC)
 				binary.BigEndian.PutUint32(buf[4:8], 0)
-				syscall.Write(nbd.socket, buf[0:16+x.len])
+				_, err := syscall.Write(nbd.socket, buf[0:16+x.len])
+				if err != nil {
+					return err
+				}
 			case NBD_CMD_WRITE:
 				n, _ := syscall.Read(nbd.socket, buf[28:28+x.len])
 				for uint32(n) < x.len {
@@ -213,7 +236,10 @@ func (nbd *NBD) handle() {
 				nbd.device.WriteAt(buf[28:28+x.len], int64(x.from))
 				binary.BigEndian.PutUint32(buf[0:4], NBD_REPLY_MAGIC)
 				binary.BigEndian.PutUint32(buf[4:8], 0)
-				syscall.Write(nbd.socket, buf[0:16])
+				_, err := syscall.Write(nbd.socket, buf[0:16])
+				if err != nil {
+					return err
+				}
 			case NBD_CMD_DISC:
 				panic("Disconnect")
 			case NBD_CMD_FLUSH:
@@ -221,12 +247,15 @@ func (nbd *NBD) handle() {
 			case NBD_CMD_TRIM:
 				binary.BigEndian.PutUint32(buf[0:4], NBD_REPLY_MAGIC)
 				binary.BigEndian.PutUint32(buf[4:8], 1)
-				syscall.Write(nbd.socket, buf[0:16])
+				_, err := syscall.Write(nbd.socket, buf[0:16])
+				if err != nil {
+					return err
+				}
 			default:
-				panic("unknown command")
+				return fmt.Errorf("unknown command: %v", x.magic)
 			}
 		default:
-			panic("Invalid packet")
+			return fmt.Errorf("Invalid packet")
 		}
 	}
 }
