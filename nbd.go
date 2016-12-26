@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"runtime"
 	"syscall"
 )
 
@@ -157,32 +156,26 @@ func (nbd *NBD) Connect() (string, error) {
 		if err != nil {
 			log.Printf("NBD error: %v, exiting", err)
 		}
-		err = nbd.Disconnect()
-		if err != nil {
-			log.Printf("Could not disconnect: %v", err)
+		if nbd.IsConnected() {
+			err = nbd.Disconnect()
+			if err != nil {
+				log.Printf("NBD disconnect error: %v, exiting", err)
+			}
 		}
+
 	}()
 
 	return dev, err
 }
 
 func (nbd *NBD) Wait() error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
 	// NBD_DO_IT does not return until disconnect
-	err := ioctl(nbd.nbd.Fd(), NBD_DO_IT, 0)
-	if err != nil {
-		// yeah, return nil
-		// need this only to clean-up stuff after ioctl if it's successfull
-		// but I am not sure if it's even possible
-		return nil
-	}
-
-	return nbd.Disconnect()
+	// at least it should....
+	return ioctl(nbd.nbd.Fd(), NBD_DO_IT, 0)
 }
 
 func (nbd *NBD) Disconnect() error {
+
 	err := ioctl(nbd.nbd.Fd(), NBD_DISCONNECT, 0)
 	if err != nil {
 		return &os.PathError{nbd.nbd.Name(), "ioctl NBD_DISCONNECT", err}
@@ -191,6 +184,11 @@ func (nbd *NBD) Disconnect() error {
 	err = ioctl(nbd.nbd.Fd(), NBD_CLEAR_SOCK, 0)
 	if err != nil {
 		return &os.PathError{nbd.nbd.Name(), "ioctl NBD_CLEAR_SOCK", err}
+	}
+
+	err = syscall.Close(nbd.socket)
+	if err != nil {
+		return &os.PathError{nbd.nbd.Name(), "ioctl close_sock", err}
 	}
 
 	return nil
@@ -241,7 +239,8 @@ func (nbd *NBD) handle() error {
 					return err
 				}
 			case NBD_CMD_DISC:
-				panic("Disconnect")
+				// disconnect; everything OK
+				return nil
 			case NBD_CMD_FLUSH:
 				nbd.device.Sync()
 			case NBD_CMD_TRIM:
