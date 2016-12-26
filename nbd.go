@@ -190,6 +190,7 @@ func (nbd *NBD) Disconnect() error {
 	if err != nil {
 		return &os.PathError{nbd.nbd.Name(), "ioctl close_sock", err}
 	}
+	nbd.socket = 0
 
 	return nil
 }
